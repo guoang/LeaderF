@@ -145,7 +145,7 @@ class GtagsExplorer(Explorer):
             else: # '--all' or empty means the whole project
                 pattern_option = None
 
-            root, dbpath, exists = self._root_dbpath(filename)
+            root, dbpath, exists = self._find_root_dbpath(filename)
             if not filename.startswith(root):
                 libdb = os.path.join(dbpath, "GTAGSLIBPATH")
                 if os.path.exists(libdb):
@@ -230,7 +230,7 @@ class GtagsExplorer(Explorer):
 
             self._pattern_regex.append(vim_regex)
 
-        root, dbpath, exists = self._root_dbpath(filename)
+        root, dbpath, exists = self._find_root_dbpath(filename)
         env = os.environ
         env["GTAGSROOT"] = root
         env["GTAGSDBPATH"] = dbpath
@@ -389,16 +389,18 @@ class GtagsExplorer(Explorer):
 
         ancestor = self._nearestAncestor(self._root_markers, os.path.dirname(filename))
         if ancestor:
-            self._project_root = ancestor
             return True
         else:
             return False
 
-    def _generateDbpath(self, path):
+    def _escapePath(self, path):
         if os.name == 'nt':
-            db_folder = re.sub(r'[\\/]', '_', path.replace(':\\', '_', 1))
+            return re.sub(r'[\\/]', '_', path.replace(':\\', '_', 1))
         else:
-            db_folder = path.replace('/', '_')
+            return path.replace('/', '_')
+
+    def _generateDbpath(self, path):
+        db_folder = self._escapePath(path)
 
         if self._store_in_project:
             return path
@@ -411,27 +413,55 @@ class GtagsExplorer(Explorer):
         else:
             return os.path.join(self._db_location, db_folder)
 
-    def _root_dbpath(self, filename):
+    def _create_root_dbpath(self, filename):
         """
         return the (root, dbpath, whether gtags exists)
+        这个接口用在：
+        1. 生成Tags时确定根目录和DB路径
+
+        先检查filename有没有对应的DB，如果没有在生成
         """
-        if self._project_root and filename.startswith(self._project_root):
-            root = self._project_root
+        root, dbpath, exist = self._find_root_dbpath(filename)
+        if exist:
+            return root, dbpath, exist
+
+        ancestor = self._nearestAncestor(self._root_markers, os.path.dirname(filename))
+        if ancestor:
+            root = ancestor
         else:
-            ancestor = self._nearestAncestor(self._root_markers, os.path.dirname(filename))
+            ancestor = self._nearestAncestor(self._root_markers, os.getcwd())
             if ancestor:
-                self._project_root = ancestor
-                root = self._project_root
+                root = ancestor
             else:
-                ancestor = self._nearestAncestor(self._root_markers, os.getcwd())
-                if ancestor:
-                    self._project_root = ancestor
-                    root = self._project_root
-                else:
-                    root = os.getcwd()
+                root = os.getcwd()
 
         dbpath = self._generateDbpath(root)
         return (root, dbpath, os.path.exists(os.path.join(dbpath, "GTAGS")))
+
+    def _find_root_dbpath(self, filename):
+        """
+        return the (root, dbpath, whether gtags exists)
+        这个接口用在：
+        1. 查找Tags时确定根目录和DB路径
+
+        如果file已经包含在某个dbpath里，那么直接返回这个dbpath和对应的root
+        """
+        if os.path.exists(self._db_location):
+            for path, dir_list, file_list in os.walk(self._db_location):
+                # 目录短的优先匹配
+                dir_list.sort(key=lambda i: -len(i))
+                for d in dir_list:
+                    if self._escapePath(os.path.dirname(filename)).startswith(d):
+                        with open(os.path.join(self._db_location, d, "GROOT"), "r") as f:
+                            root = f.read()
+                        return root, os.path.join(self._db_location, d), True
+
+        ancestor = self._nearestAncestor(self._root_markers, os.path.dirname(filename))
+        if ancestor:
+            root = ancestor
+        else:
+            root = os.path.dirname(filename)
+        return "", "", False
 
     def updateGtags(self, filename, single_update, auto):
         self._task_queue.put(partial(self._update, filename, single_update, auto))
@@ -450,7 +480,7 @@ class GtagsExplorer(Explorer):
         if filename == "":
             return
 
-        root, dbpath, exists = self._root_dbpath(filename)
+        root, dbpath, exists = self._find_root_dbpath(filename)
         try:
             lfCmd("echohl Question")
             if self._store_in_project:
@@ -458,6 +488,7 @@ class GtagsExplorer(Explorer):
                     os.remove(os.path.join(dbpath, "GTAGS"))
                     os.remove(os.path.join(dbpath, "GPATH"))
                     os.remove(os.path.join(dbpath, "GRTAGS"))
+                    os.remove(os.path.join(dbpath, "GROOT"))
                     if os.path.exists(os.path.join(dbpath, "GTAGSLIBPATH")):
                         os.remove(os.path.join(dbpath, "GTAGSLIBPATH"))
             elif lfEval('input("Are you sure you want to remove directory `{}`?[Ny] ")'.format(lfEncode(dbpath.replace('\\', r'\\')))) in ["Y","y"]:
@@ -476,7 +507,7 @@ class GtagsExplorer(Explorer):
         if self._gtagsconf == '' and os.name == 'nt':
             self._gtagsconf = os.path.normpath(os.path.join(self._which("gtags.exe"), "..", "share", "gtags", "gtags.conf")).join('""')
 
-        root, dbpath, exists = self._root_dbpath(filename)
+        root, dbpath, exists = self._create_root_dbpath(filename)
         if not filename.startswith(root):
             # if self._has_nvim:
             #     vim.async_call(lfCmd, "let g:Lf_Debug_Gtags = '%s'" % escQuote(str((filename, root))))
@@ -497,9 +528,14 @@ class GtagsExplorer(Explorer):
                 subprocess.Popen(cmd, shell=True, env=env)
         elif not auto:
             self._executeCmd(root, dbpath)
-        elif self._isVersionControl(filename):
-            if not exists:
-                self._executeCmd(root, dbpath)
+        elif exists:
+            # auto update 必须是已经存在的DB
+            self._executeCmd(root, dbpath)
+
+        if not auto:
+            # write GROOT
+            with open(os.path.join(dbpath, "GROOT"), "w") as f:
+                f.write(root)
 
     def _updateLibGtags(self, root, dbpath):
         if not self._gtagslibpath:
