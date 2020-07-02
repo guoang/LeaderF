@@ -880,9 +880,10 @@ class GtagsExplorer(Explorer):
                 vim.async_call(print_log, error)
                 vim.async_call(print_log, "gtags error!")
             else:
-                print(cmd)
-                print(error)
-                print("gtags error!")
+                if not error.startswith('Warning'):
+                    print(cmd)
+                    print(error)
+                    print("gtags error!")
         else:
             if self._has_nvim:
                 vim.async_call(print_log, "gtags generated successfully!")
