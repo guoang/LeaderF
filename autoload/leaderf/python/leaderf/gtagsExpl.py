@@ -461,7 +461,9 @@ class GtagsExplorer(Explorer):
             root = ancestor
         else:
             root = os.path.dirname(filename)
-        return "", "", False
+
+        dbpath = self._generateDbpath(root)
+        return root, dbpath, False
 
     def updateGtags(self, filename, single_update, auto):
         self._task_queue.put(partial(self._update, filename, single_update, auto))
